@@ -40,3 +40,4 @@ uv.lock
 
 # OS
 .DS_Store
+.pampu.toml
