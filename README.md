@@ -64,6 +64,8 @@ pampu versions                    # List available versions
 pampu version-create              # Create version from latest build on current branch
 pampu version-create MYPROJECT-BUILD-123  # Create version from specific build
 pampu deploy myversion DEV        # Deploy a version to an environment
+pampu deploy myversion ENV1 ENV2 --chain     # Deploy sequentially, wait for each
+pampu deploy myversion ENV1 ENV2 --parallel  # Deploy to all simultaneously
 ```
 
 For safety reasons, `pampu deploy` refuses to deploy to any environment containing "PROD" in its name.
@@ -97,7 +99,7 @@ Branch detection extracts ticket numbers (e.g., `PROJ-12345`) from branch names 
 | `deploys [plan]` | Show deployment status |
 | `versions [plan]` | List available versions |
 | `version-create [build]` | Create a version from a build |
-| `deploy <version> <env>` | Deploy a version to an environment |
+| `deploy <version> <env>...` | Deploy a version to one or more environments |
 
 ## License
 

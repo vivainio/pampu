@@ -453,14 +453,40 @@ def cmd_version_create(args):
         sys.exit(1)
 
 
+def wait_for_deployment(client, result_id, env_name, poll_interval=5):
+    """Wait for deployment to complete. Returns True if successful."""
+    import time
+
+    while True:
+        try:
+            result = client.get(f"rest/api/latest/deploy/result/{result_id}")
+            state = result.get("deploymentState", "")
+            life_cycle = result.get("lifeCycleState", "")
+
+            if life_cycle == "FINISHED":
+                if state == "SUCCESS":
+                    print(f"  {env_name}: SUCCESS")
+                    return True
+                else:
+                    print(f"  {env_name}: FAILED ({state})")
+                    return False
+
+            time.sleep(poll_interval)
+        except Exception as e:
+            print(f"  {env_name}: Error polling status: {e}", file=sys.stderr)
+            return False
+
+
 def cmd_deploy(args):
-    """Deploy a version to an environment."""
+    """Deploy a version to one or more environments."""
     client = get_bamboo()
 
-    config = get_repo_config()
-    plan_key = config.get("plan")
+    plan_key = args.plan
     if not plan_key:
-        print("Error: No .pampu.toml found with plan", file=sys.stderr)
+        config = get_repo_config()
+        plan_key = config.get("plan")
+    if not plan_key:
+        print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
         sys.exit(1)
 
     proj_id = get_deployment_project_id(client, plan_key)
@@ -485,14 +511,20 @@ def cmd_deploy(args):
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Safety check: never deploy to PROD
-    env_name = args.environment
-    if "PROD" in env_name.upper():
-        print("Error: Deploying to PROD environments is not allowed", file=sys.stderr)
-        sys.exit(1)
+    # Get project environments
     try:
         proj_details = client.deployment_project(proj_id)
         environments = proj_details.get("environments", [])
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve environment names to IDs
+    env_targets = []
+    for env_name in args.environments:
+        if "PROD" in env_name.upper():
+            print(f"Error: Deploying to PROD environments is not allowed ({env_name})", file=sys.stderr)
+            sys.exit(1)
         env_id = None
         for env in environments:
             if env.get("name") == env_name:
@@ -504,17 +536,42 @@ def cmd_deploy(args):
             for env in environments:
                 print(f"  {env.get('name')}")
             sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        env_targets.append((env_name, env_id))
 
-    # Trigger deployment
-    try:
-        result = client.trigger_deployment_for_version_on_environment(version_id, env_id)
-        print(f"Deployment triggered: {result.get('deploymentResultId', 'OK')}")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Deploy based on mode
+    if args.chain:
+        print(f"Deploying {version_name} to {len(env_targets)} environments (chained):")
+        for env_name, env_id in env_targets:
+            print(f"  {env_name}: deploying...")
+            try:
+                result = client.trigger_deployment_for_version_on_environment(version_id, env_id)
+                result_id = result.get("deploymentResultId")
+                if not wait_for_deployment(client, result_id, env_name):
+                    print("Chain stopped due to failure.", file=sys.stderr)
+                    sys.exit(1)
+            except Exception as e:
+                print(f"  {env_name}: Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        print("All deployments completed successfully.")
+
+    elif args.parallel:
+        print(f"Deploying {version_name} to {len(env_targets)} environments (parallel):")
+        for env_name, env_id in env_targets:
+            try:
+                result = client.trigger_deployment_for_version_on_environment(version_id, env_id)
+                print(f"  {env_name}: triggered (ID: {result.get('deploymentResultId')})")
+            except Exception as e:
+                print(f"  {env_name}: Error: {e}", file=sys.stderr)
+
+    else:
+        # Single environment, original behavior
+        env_name, env_id = env_targets[0]
+        try:
+            result = client.trigger_deployment_for_version_on_environment(version_id, env_id)
+            print(f"Deployment triggered: {result.get('deploymentResultId', 'OK')}")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def main() -> None:
@@ -557,9 +614,12 @@ def main() -> None:
     version_create_parser = subparsers.add_parser("version-create", help="Create a version from a build")
     version_create_parser.add_argument("build", nargs="?", help="Build key. If omitted, uses latest from current branch")
 
-    deploy_parser = subparsers.add_parser("deploy", help="Deploy a version to an environment")
+    deploy_parser = subparsers.add_parser("deploy", help="Deploy a version to one or more environments")
     deploy_parser.add_argument("version", help="Version name")
-    deploy_parser.add_argument("environment", help="Environment name (e.g., CORE_DEV)")
+    deploy_parser.add_argument("environments", nargs="+", help="Environment name(s)")
+    deploy_parser.add_argument("--plan", help="Plan key (default: from .pampu.toml)")
+    deploy_parser.add_argument("--chain", action="store_true", help="Deploy sequentially, waiting for each to complete")
+    deploy_parser.add_argument("--parallel", action="store_true", help="Deploy to all environments simultaneously")
 
     args = parser.parse_args()
 
