@@ -66,6 +66,8 @@ pampu version-create MYPROJECT-BUILD-123  # Create version from specific build
 pampu deploy myversion DEV        # Deploy a version to an environment
 ```
 
+For safety reasons, `pampu deploy` refuses to deploy to any environment containing "PROD" in its name.
+
 ## Project configuration
 
 Create a `.pampu.toml` in your repository root to enable git-aware commands:
