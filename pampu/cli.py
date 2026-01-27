@@ -137,23 +137,17 @@ def get_git_branch():
 
 
 def get_repo_config():
-    """Load .pampu.toml from repo root."""
-    import subprocess
+    """Load .pampu.toml by searching upward from current directory."""
     import tomllib
+    from pathlib import Path
 
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        repo_root = result.stdout.strip()
-        config_path = f"{repo_root}/.pampu.toml"
-        with open(config_path, "rb") as f:
-            return tomllib.load(f)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return {}
+    current = Path.cwd()
+    for directory in [current, *current.parents]:
+        config_path = directory / ".pampu.toml"
+        if config_path.exists():
+            with open(config_path, "rb") as f:
+                return tomllib.load(f)
+    return {}
 
 
 def extract_ticket(branch_name):
