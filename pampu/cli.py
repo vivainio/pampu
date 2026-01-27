@@ -165,13 +165,13 @@ def extract_ticket(branch_name):
 
 
 def find_bamboo_branch(client, plan_key, ticket):
-    """Find Bamboo branch matching ticket number."""
+    """Find Bamboo branch matching ticket number. Returns (key, shortName)."""
     branches = list(client.plan_branches(plan_key, max_results=1000))
     for branch in branches:
         name = branch.get("shortName", "")
         if ticket.lower() in name.lower():
-            return branch.get("key")
-    return None
+            return branch.get("key"), name
+    return None, None
 
 
 def cmd_status(args):
@@ -204,7 +204,7 @@ def cmd_status(args):
                 print(f"Error: Could not extract ticket from branch '{git_branch}'", file=sys.stderr)
                 sys.exit(1)
 
-            branch_key = find_bamboo_branch(client, plan_key, ticket)
+            branch_key, _ = find_bamboo_branch(client, plan_key, ticket)
             if not branch_key:
                 print(f"Error: No Bamboo branch found matching '{ticket}'", file=sys.stderr)
                 sys.exit(1)
@@ -341,6 +341,188 @@ def cmd_deploys(args):
         print(f"No deployment projects found for {plan_key}")
 
 
+def get_deployment_project_id(client, plan_key):
+    """Get deployment project ID for a plan."""
+    projects = list(client.get_deployment_projects_for_plan(plan_key))
+    if not projects:
+        return None
+    return projects[0].get("id")
+
+
+def cmd_versions(args):
+    """List available versions for deployment."""
+    client = get_bamboo()
+
+    # Get plan from args or config
+    plan_key = args.plan
+    if not plan_key:
+        config = get_repo_config()
+        plan_key = config.get("plan")
+        if not plan_key:
+            print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
+            sys.exit(1)
+
+    proj_id = get_deployment_project_id(client, plan_key)
+    if not proj_id:
+        print(f"No deployment project found for {plan_key}")
+        sys.exit(1)
+
+    try:
+        data = client.get(f"rest/api/latest/deploy/project/{proj_id}/versions", params={"max-result": args.limit})
+        versions = data.get("versions", [])
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not versions:
+        print("No versions found.")
+        return
+
+    for v in versions:
+        name = v.get("name", "?")
+        when = relative_time(v.get("creationDate"))
+        who = v.get("creatorDisplayName", "")
+        build = v.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
+        print(f"{name:50} {when:8} {who:20} {build}")
+
+
+def cmd_version_create(args):
+    """Create a version from a build."""
+    client = get_bamboo()
+
+    config = get_repo_config()
+    plan_key = config.get("plan")
+    if not plan_key:
+        print("Error: No .pampu.toml found with plan", file=sys.stderr)
+        sys.exit(1)
+
+    build_key = args.build
+
+    # If no build specified, get latest from current branch
+    branch_name = None
+    if not build_key:
+        git_branch = get_git_branch()
+        if not git_branch:
+            print("Error: Not in a git repository", file=sys.stderr)
+            sys.exit(1)
+
+        if git_branch in ("main", "master"):
+            branch_key = plan_key
+            branch_name = "master"
+        else:
+            ticket = extract_ticket(git_branch)
+            if not ticket:
+                print(f"Error: Could not extract ticket from branch '{git_branch}'", file=sys.stderr)
+                sys.exit(1)
+
+            branch_key, branch_name = find_bamboo_branch(client, plan_key, ticket)
+            if not branch_key:
+                print(f"Error: No Bamboo branch found matching '{ticket}'", file=sys.stderr)
+                sys.exit(1)
+
+        # Get latest build
+        data = client.get(f"rest/api/latest/result/{branch_key}", params={"max-results": 1})
+        results = data.get("results", {}).get("result", [])
+        if not results:
+            print(f"No builds found for {branch_key}")
+            sys.exit(1)
+        build_key = results[0].get("key")
+        build_number = results[0].get("buildNumber")
+    else:
+        # Extract build number from provided build key
+        build_number = build_key.split("-")[-1]
+        branch_name = None
+
+    proj_id = get_deployment_project_id(client, plan_key)
+    if not proj_id:
+        print(f"No deployment project found for {plan_key}")
+        sys.exit(1)
+
+    # Create version with branch-number format
+    if branch_name:
+        version_name = f"{branch_name}-{build_number}"
+    else:
+        version_name = build_key.replace(plan_key + "-", "")
+
+    try:
+        resp = client.session.post(
+            f"{client.url}rest/api/latest/deploy/project/{proj_id}/version",
+            json={"planResultKey": build_key, "name": version_name},
+        )
+        if resp.status_code != 200:
+            print(f"Error: {resp.status_code} - {resp.text}", file=sys.stderr)
+            sys.exit(1)
+        result = resp.json()
+        print(f"Created version: {result.get('name')}")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_deploy(args):
+    """Deploy a version to an environment."""
+    client = get_bamboo()
+
+    config = get_repo_config()
+    plan_key = config.get("plan")
+    if not plan_key:
+        print("Error: No .pampu.toml found with plan", file=sys.stderr)
+        sys.exit(1)
+
+    proj_id = get_deployment_project_id(client, plan_key)
+    if not proj_id:
+        print(f"No deployment project found for {plan_key}")
+        sys.exit(1)
+
+    # Find version ID by name
+    version_name = args.version
+    try:
+        data = client.get(f"rest/api/latest/deploy/project/{proj_id}/versions", params={"max-result": 100})
+        versions = data.get("versions", [])
+        version_id = None
+        for v in versions:
+            if v.get("name") == version_name:
+                version_id = v.get("id")
+                break
+        if not version_id:
+            print(f"Error: Version '{version_name}' not found", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Safety check: never deploy to PROD
+    env_name = args.environment
+    if "PROD" in env_name.upper():
+        print("Error: Deploying to PROD environments is not allowed", file=sys.stderr)
+        sys.exit(1)
+    try:
+        proj_details = client.deployment_project(proj_id)
+        environments = proj_details.get("environments", [])
+        env_id = None
+        for env in environments:
+            if env.get("name") == env_name:
+                env_id = env.get("id")
+                break
+        if not env_id:
+            print(f"Error: Environment '{env_name}' not found", file=sys.stderr)
+            print("Available environments:")
+            for env in environments:
+                print(f"  {env.get('name')}")
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Trigger deployment
+    try:
+        result = client.trigger_deployment_for_version_on_environment(version_id, env_id)
+        print(f"Deployment triggered: {result.get('deploymentResultId', 'OK')}")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pampu",
@@ -374,6 +556,17 @@ def main() -> None:
     deploys_parser = subparsers.add_parser("deploys", help="Show deployment status for each environment")
     deploys_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
 
+    versions_parser = subparsers.add_parser("versions", help="List available versions")
+    versions_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
+    versions_parser.add_argument("-n", "--limit", type=int, default=20, help="Number of versions (default: 20)")
+
+    version_create_parser = subparsers.add_parser("version-create", help="Create a version from a build")
+    version_create_parser.add_argument("build", nargs="?", help="Build key. If omitted, uses latest from current branch")
+
+    deploy_parser = subparsers.add_parser("deploy", help="Deploy a version to an environment")
+    deploy_parser.add_argument("version", help="Version name")
+    deploy_parser.add_argument("environment", help="Environment name (e.g., CORE_DEV)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -390,6 +583,12 @@ def main() -> None:
         cmd_status(args)
     elif args.command == "deploys":
         cmd_deploys(args)
+    elif args.command == "versions":
+        cmd_versions(args)
+    elif args.command == "version-create":
+        cmd_version_create(args)
+    elif args.command == "deploy":
+        cmd_deploy(args)
     else:
         parser.print_help()
 
