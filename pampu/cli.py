@@ -266,47 +266,41 @@ def cmd_deploys(args):
             print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
             sys.exit(1)
 
-    # Find deployment projects for this plan
+    # Fetch entire deployment dashboard in one call
     try:
-        deploy_projects = client.get_deployment_projects_for_plan(plan_key)
+        dashboard = client.deployment_dashboard()
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not deploy_projects:
-        print(f"No deployment projects found for {plan_key}")
-        return
+    # Find projects matching our plan
+    found = False
+    for item in dashboard:
+        proj = item.get("deploymentProject", {})
+        proj_plan = proj.get("planKey", {}).get("key", "")
 
-    for proj in deploy_projects:
-        proj_name = proj.get("name", "Unknown")
-        proj_id = proj.get("id")
-
-        # Get full project details with environments
-        proj_details = client.deployment_project(proj_id)
-        environments = proj_details.get("environments", [])
-
-        if not environments:
+        if proj_plan != plan_key:
             continue
 
+        found = True
+        proj_name = proj.get("name", "Unknown")
         print(f"\n{proj_name}")
         print("-" * len(proj_name))
 
-        for env in environments:
-            env_id = env.get("id")
+        for env_status in item.get("environmentStatuses", []):
+            env = env_status.get("environment", {})
             env_name = env.get("name", "Unknown")
+            deploy = env_status.get("deploymentResult")
+            if deploy:
+                version = deploy.get("deploymentVersion", {}).get("name", "?")
+                state = deploy.get("deploymentState", "?")
+            else:
+                version = "(no deployments)"
+                state = ""
+            print(f"  {env_name:20} {version:50} {state}")
 
-            # Get latest deployment for this environment
-            try:
-                results = list(client.deployment_environment_results(env_id, max_results=1))
-                if results:
-                    r = results[0]
-                    version = r.get("deploymentVersion", {}).get("name", "?")
-                    state = r.get("deploymentState", "?")
-                    print(f"  {env_name:20} {version:50} {state}")
-                else:
-                    print(f"  {env_name:20} {'(no deployments)':50}")
-            except Exception:
-                print(f"  {env_name:20} {'(error)':50}")
+    if not found:
+        print(f"No deployment projects found for {plan_key}")
 
 
 def main() -> None:
