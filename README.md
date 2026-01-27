@@ -16,22 +16,11 @@ uv tool install pampu
 
 ## Setup
 
-### Interactive setup
-
 ```bash
 pampu init
 ```
 
 This will prompt for your Bamboo URL and Personal Access Token, then save them to `~/.config/pampu/credentials.toml`.
-
-### Environment variables
-
-Alternatively, set environment variables (these take precedence over the config file):
-
-```bash
-export BAMBOO_URL='https://bamboo.yourcompany.com'
-export BAMBOO_TOKEN='your-personal-access-token'
-```
 
 ### Getting a Personal Access Token
 
