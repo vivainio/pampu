@@ -253,6 +253,32 @@ def cmd_status(args):
         sys.exit(1)
 
 
+def relative_time(timestamp_ms):
+    """Convert timestamp (ms) to relative time string."""
+    import time
+
+    if not timestamp_ms:
+        return ""
+
+    now = time.time() * 1000
+    diff_seconds = (now - timestamp_ms) / 1000
+
+    if diff_seconds < 60:
+        return "just now"
+    elif diff_seconds < 3600:
+        mins = int(diff_seconds / 60)
+        return f"{mins}m ago"
+    elif diff_seconds < 86400:
+        hours = int(diff_seconds / 3600)
+        return f"{hours}h ago"
+    elif diff_seconds < 604800:
+        days = int(diff_seconds / 86400)
+        return f"{days}d ago"
+    else:
+        weeks = int(diff_seconds / 604800)
+        return f"{weeks}w ago"
+
+
 def cmd_deploys(args):
     """Show deployment status for each environment."""
     client = get_bamboo()
@@ -299,12 +325,17 @@ def cmd_deploys(args):
             env_name = env.get("name", "Unknown")
             deploy = env_status.get("deploymentResult")
             if deploy:
-                version = deploy.get("deploymentVersion", {}).get("name", "?")
+                version_info = deploy.get("deploymentVersion", {})
+                version = version_info.get("name", "?")
                 state = deploy.get("deploymentState", "?")
+                when = relative_time(deploy.get("finishedDate"))
+                who = version_info.get("creatorDisplayName", "")
             else:
                 version = "(no deployments)"
                 state = ""
-            print(f"  {env_name:20} {version:50} {state}")
+                when = ""
+                who = ""
+            print(f"  {env_name:20} {version:40} {state:10} {when:8} {who}")
 
     if not found:
         print(f"No deployment projects found for {plan_key}")
