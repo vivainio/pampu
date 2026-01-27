@@ -257,11 +257,11 @@ def cmd_deploys(args):
     """Show deployment status for each environment."""
     client = get_bamboo()
 
-    # Get plan from args or config
+    # Get plan/project from args or config
     plan_key = args.plan
     if not plan_key:
         config = get_repo_config()
-        plan_key = config.get("plan")
+        plan_key = config.get("project") or config.get("plan")
         if not plan_key:
             print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
             sys.exit(1)
@@ -273,14 +273,21 @@ def cmd_deploys(args):
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Find projects matching our plan
+    # Check if plan_key is a project (no hyphen) or full plan key
+    is_project = "-" not in plan_key
+
+    # Find projects matching our plan/project
     found = False
     for item in dashboard:
         proj = item.get("deploymentProject", {})
         proj_plan = proj.get("planKey", {}).get("key", "")
 
-        if proj_plan != plan_key:
-            continue
+        if is_project:
+            if not proj_plan.startswith(plan_key + "-"):
+                continue
+        else:
+            if proj_plan != plan_key:
+                continue
 
         found = True
         proj_name = proj.get("name", "Unknown")
