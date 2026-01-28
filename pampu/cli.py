@@ -158,6 +158,28 @@ def extract_ticket(branch_name):
     return match.group(1).upper() if match else None
 
 
+def get_git_commit_info(sha):
+    """Get commit info from local git repo. Returns (short_sha, subject) or None."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%h\t%an\t%ct\t%s", sha],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        line = result.stdout.strip()
+        if line:
+            parts = line.split("\t", 3)
+            if len(parts) == 4:
+                # sha, author, timestamp (ms), subject
+                return parts[0], parts[1], int(parts[2]) * 1000, parts[3]
+    except subprocess.CalledProcessError:
+        pass
+    return None
+
+
 def find_bamboo_branch(client, plan_key, ticket):
     """Find Bamboo branch matching ticket number. Returns (key, shortName)."""
     branches = list(client.plan_branches(plan_key, max_results=1000))
@@ -318,19 +340,19 @@ def relative_time(timestamp_ms):
     diff_seconds = (now - timestamp_ms) / 1000
 
     if diff_seconds < 60:
-        return "just now"
+        return "now"
     elif diff_seconds < 3600:
         mins = int(diff_seconds / 60)
-        return f"{mins}m ago"
+        return f"{mins}m"
     elif diff_seconds < 86400:
         hours = int(diff_seconds / 3600)
-        return f"{hours}h ago"
+        return f"{hours}h"
     elif diff_seconds < 604800:
         days = int(diff_seconds / 86400)
-        return f"{days}d ago"
+        return f"{days}d"
     else:
         weeks = int(diff_seconds / 604800)
-        return f"{weeks}w ago"
+        return f"{weeks}w"
 
 
 def cmd_deploys(args):
@@ -384,12 +406,26 @@ def cmd_deploys(args):
                 state = deploy.get("deploymentState", "?")
                 when = relative_time(deploy.get("finishedDate"))
                 who = version_info.get("creatorDisplayName", "")
+                build = version_info.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
             else:
                 version = "(no deployments)"
                 state = ""
                 when = ""
                 who = ""
-            print(f"  {env_name:20} {version:40} {state:10} {when:8} {who}")
+                build = ""
+            if args.sha and build:
+                sha = get_build_vcs_revision(client, build)
+                git_info = get_git_commit_info(sha) if sha else None
+                if git_info:
+                    short_sha, _author, _timestamp, subject = git_info
+                    # Truncate subject to fit
+                    if len(subject) > 50:
+                        subject = subject[:47] + "..."
+                    print(f"  {env_name:20} {short_sha:10} {subject}")
+                else:
+                    print(f"  {env_name:20} {sha or '?':10} {version}")
+            else:
+                print(f"  {env_name:20} {version:40} {state:10} {when:8} {who}")
 
     if not found:
         print(f"No deployment projects found for {plan_key}")
@@ -401,6 +437,314 @@ def get_deployment_project_id(client, plan_key):
     if not projects:
         return None
     return projects[0].get("id")
+
+
+def get_env_shas(client, plan_key):
+    """Get SHA for each environment. Returns dict of {env_name: sha}."""
+    try:
+        dashboard = client.deployment_dashboard()
+    except Exception:
+        return {}
+
+    is_project = "-" not in plan_key
+
+    env_shas = {}
+    for item in dashboard:
+        proj = item.get("deploymentProject", {})
+        proj_plan = proj.get("planKey", {}).get("key", "")
+
+        if is_project:
+            if not proj_plan.startswith(plan_key + "-"):
+                continue
+        else:
+            if proj_plan != plan_key:
+                continue
+
+        for env_status in item.get("environmentStatuses", []):
+            env = env_status.get("environment", {})
+            env_name = env.get("name", "Unknown")
+            deploy = env_status.get("deploymentResult")
+            if deploy:
+                version_info = deploy.get("deploymentVersion", {})
+                build = version_info.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
+                if build:
+                    sha = get_build_vcs_revision(client, build)
+                    if sha:
+                        env_shas[env_name] = sha
+
+    return env_shas
+
+
+def find_oldest_sha(shas):
+    """Find the oldest SHA (ancestor of all others) from a list."""
+    import subprocess
+
+    if not shas:
+        return None
+    if len(shas) == 1:
+        return shas[0]
+
+    # Use git merge-base to find common ancestor
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--octopus"] + list(shas),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        # Fallback: return first sha
+        return shas[0]
+
+
+def find_newest_sha(shas):
+    """Find the newest SHA (descendant of all others) from a list."""
+    import subprocess
+
+    if not shas:
+        return None
+    if len(shas) == 1:
+        return shas[0]
+
+    # Check each SHA to see if it contains all others
+    for candidate in shas:
+        is_newest = True
+        for other in shas:
+            if other == candidate:
+                continue
+            # Check if candidate is descendant of other
+            result = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", other, candidate],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                is_newest = False
+                break
+        if is_newest:
+            return candidate
+
+    # No single newest - return the one with most recent commit date
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%H", "--date-order"] + list(shas),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()[:8]
+    except subprocess.CalledProcessError:
+        return shas[0]
+
+
+def get_git_log(from_sha, to_ref="HEAD", first_parent=True):
+    """Get git log as list of (sha, author, timestamp, subject) tuples."""
+    import subprocess
+
+    try:
+        # Use tab separator: %h<tab>%an<tab>%ct<tab>%s (ct = committer timestamp)
+        cmd = ["git", "log", "--format=%h\t%an\t%ct\t%s", "--reverse"]
+        if first_parent:
+            cmd.append("--first-parent")
+        cmd.append(f"{from_sha}^..{to_ref}")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        commits = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                parts = line.split("\t", 3)
+                if len(parts) == 4:
+                    sha, author, timestamp, subject = parts
+                    commits.append((sha, author, int(timestamp) * 1000, subject))
+        return commits
+    except subprocess.CalledProcessError:
+        return []
+
+
+def cmd_timeline(args):
+    """Show git history timeline with environment markers."""
+    client = get_bamboo()
+
+    # Get plan from args or config
+    plan_key = args.plan
+    if not plan_key:
+        config = get_repo_config()
+        plan_key = config.get("project") or config.get("plan")
+        if not plan_key:
+            print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
+            sys.exit(1)
+
+    # Get SHA for each environment
+    env_shas = get_env_shas(client, plan_key)
+    if not env_shas:
+        print("No deployments found or could not fetch SHAs")
+        sys.exit(1)
+
+    # Build reverse lookup: sha -> [env_names]
+    sha_to_envs = {}
+    for env_name, sha in env_shas.items():
+        sha_to_envs.setdefault(sha, []).append(env_name)
+
+    # Filter SHAs to only those on main branch
+    import subprocess
+
+    def is_on_main(sha):
+        """Check if SHA is an ancestor of origin/main."""
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, "origin/main"],
+            capture_output=True,
+        )
+        return result.returncode == 0
+
+    main_shas = [sha for sha in set(env_shas.values()) if is_on_main(sha)]
+    branch_shas = {sha: [] for sha in set(env_shas.values()) if not is_on_main(sha)}
+
+    # Track which envs are on branches
+    for env_name, sha in env_shas.items():
+        if sha in branch_shas:
+            branch_shas[sha].append(env_name)
+
+    if not main_shas:
+        print("No deployments found on main branch")
+        sys.exit(1)
+
+    # Find oldest SHA on main
+    oldest = find_oldest_sha(main_shas)
+    if not oldest:
+        print("Could not determine oldest deployment")
+        sys.exit(1)
+
+    # Get git log from oldest to origin/main
+    commits = get_git_log(oldest, "origin/main")
+    if not commits:
+        print("Could not get git history")
+        sys.exit(1)
+
+    # Build stage groupings from all environments
+    # Parse SERVICE_STAGE pattern (e.g., ADMIN_DEV -> service=ADMIN, stage=DEV)
+    all_envs = list(env_shas.keys())
+    services = set()
+    stages = set()
+    for env in all_envs:
+        if "_" in env:
+            service, stage = env.rsplit("_", 1)
+            services.add(service)
+            stages.add(stage)
+
+    def format_env_label(envs):
+        """Format environment list, grouping complete stages as 'all DEV' etc."""
+        if not envs:
+            return ""
+
+        # Parse environments into service/stage
+        env_set = set(envs)
+        by_stage = {}
+        ungrouped = []
+        for env in envs:
+            if "_" in env:
+                service, stage = env.rsplit("_", 1)
+                by_stage.setdefault(stage, set()).add(service)
+            else:
+                ungrouped.append(env)
+
+        # Check which stages have all services
+        labels = []
+        grouped_envs = set()
+        for stage in sorted(stages):
+            if stage in by_stage and by_stage[stage] == services:
+                labels.append(f"all {stage}")
+                for service in services:
+                    grouped_envs.add(f"{service}_{stage}")
+
+        # Add remaining ungrouped environments
+        remaining = sorted(env_set - grouped_envs)
+        labels.extend(remaining)
+
+        return ", ".join(labels)
+
+    def abbreviate_subject(subject, max_len=60):
+        """Abbreviate merge PR subjects and truncate if needed."""
+        import re
+        # "Merge pull request #123 from org/branch-name" -> "#123 branch-name"
+        match = re.match(r"Merge pull request #(\d+) from [^/]+/(.+)", subject)
+        if match:
+            pr_num, branch = match.groups()
+            # Strip common prefixes from branch name
+            branch = re.sub(r"^(bugfix|bugfixes|feature|features|tmp)/", "", branch)
+            subject = f"#{pr_num} {branch}"
+
+        if len(subject) > max_len:
+            subject = subject[:max_len - 3] + "..."
+        return subject
+
+    def short_name(author):
+        """Get first name or short version of author name."""
+        return author.split()[0] if author else ""
+
+    # Print timeline
+    for sha, author, timestamp, subject in commits:
+        envs = sha_to_envs.get(sha, [])
+        if envs:
+            env_label = format_env_label(envs)
+            marker = f"<- {env_label}"
+        else:
+            marker = ""
+
+        subject = abbreviate_subject(subject, 48)
+        name = short_name(author)
+        age = relative_time(timestamp)
+        print(f"{sha}  {age:3} {name:10} {subject:50} {marker}")
+
+    # Show branch deployments
+    if branch_shas:
+        print()
+        print("On feature branches:")
+        for sha, envs in branch_shas.items():
+            # Get branch name containing this commit
+            try:
+                result = subprocess.run(
+                    ["git", "branch", "-r", "--contains", sha],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                branches = [b.strip().replace("origin/", "") for b in result.stdout.strip().split("\n") if b.strip() and "main" not in b]
+                branch_name = branches[0] if branches else "unknown"
+                # Strip common prefixes
+                import re
+                branch_name = re.sub(r"^(bugfix|bugfixes|feature|features|tmp)/", "", branch_name)
+            except subprocess.CalledProcessError:
+                branch_name = "unknown"
+
+            git_info = get_git_commit_info(sha)
+            if git_info:
+                short_sha, author, timestamp, _subject = git_info
+                name = short_name(author)
+                age = relative_time(timestamp)
+                env_label = format_env_label(envs)
+                if len(branch_name) > 40:
+                    branch_name = branch_name[:37] + "..."
+                print(f"  {short_sha}  {age:3} {name:10} {branch_name:42} <- {env_label}")
+
+
+_vcs_revision_cache = {}
+
+
+def get_build_vcs_revision(client, build_key):
+    """Get the VCS revision (git SHA) for a build. Results are cached."""
+    if build_key in _vcs_revision_cache:
+        return _vcs_revision_cache[build_key]
+    try:
+        result = client.build_result(build_key)
+        sha = result.get("vcsRevisionKey", "")[:8] if result else ""
+    except Exception:
+        sha = ""
+    _vcs_revision_cache[build_key] = sha
+    return sha
 
 
 def cmd_versions(args):
@@ -437,7 +781,18 @@ def cmd_versions(args):
         when = relative_time(v.get("creationDate"))
         who = v.get("creatorDisplayName", "")
         build = v.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
-        print(f"{name:50} {when:8} {who:20} {build}")
+        if args.sha and build:
+            sha = get_build_vcs_revision(client, build)
+            git_info = get_git_commit_info(sha) if sha else None
+            if git_info:
+                short_sha, _author, _timestamp, subject = git_info
+                if len(subject) > 60:
+                    subject = subject[:57] + "..."
+                print(f"{name:30} {short_sha:10} {subject}")
+            else:
+                print(f"{name:30} {sha or '?':10} (not in local repo)")
+        else:
+            print(f"{name:50} {when:8} {who:20} {build}")
 
 
 def cmd_version_create(args):
@@ -669,10 +1024,12 @@ def main() -> None:
 
     deploys_parser = subparsers.add_parser("deploys", help="Show deployment status for each environment")
     deploys_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
+    deploys_parser.add_argument("--sha", action="store_true", help="Show git SHA for each deployment")
 
     versions_parser = subparsers.add_parser("versions", help="List available versions")
     versions_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
     versions_parser.add_argument("-n", "--limit", type=int, default=20, help="Number of versions (default: 20)")
+    versions_parser.add_argument("--sha", action="store_true", help="Show git SHA for each version")
 
     version_create_parser = subparsers.add_parser("version-create", help="Create a version from a build")
     version_create_parser.add_argument("build", nargs="?", help="Build key. If omitted, uses latest from current branch")
@@ -683,6 +1040,9 @@ def main() -> None:
     deploy_parser.add_argument("--plan", help="Plan key (default: from .pampu.toml)")
     deploy_parser.add_argument("--chain", action="store_true", help="Deploy sequentially, waiting for each to complete")
     deploy_parser.add_argument("--parallel", action="store_true", help="Deploy to all environments simultaneously")
+
+    timeline_parser = subparsers.add_parser("timeline", help="Show git history with environment markers")
+    timeline_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
 
     args = parser.parse_args()
 
@@ -708,6 +1068,8 @@ def main() -> None:
         cmd_version_create(args)
     elif args.command == "deploy":
         cmd_deploy(args)
+    elif args.command == "timeline":
+        cmd_timeline(args)
     else:
         parser.print_help()
 
