@@ -45,6 +45,7 @@ pampu branches MYPROJECT-BUILD    # List branches for a plan
 pampu builds MYPROJECT-BUILD      # List recent builds
 pampu builds MYPROJECT-BUILD -n 20  # Show more builds
 pampu status MYPROJECT-BUILD-123  # Show build details
+pampu logs MYPROJECT-BUILD-123    # Download and display build logs
 ```
 
 ### Git-aware status
@@ -96,6 +97,7 @@ Branch detection extracts ticket numbers (e.g., `PROJ-12345`) from branch names 
 | `branches <plan>` | List branches for a plan |
 | `builds <plan>` | List builds for a plan or branch |
 | `status [build]` | Show detailed build status |
+| `logs <build>` | Download and display build logs |
 | `deploys [plan]` | Show deployment status |
 | `versions [plan]` | List available versions |
 | `version-create [build]` | Create a version from a build |

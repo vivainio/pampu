@@ -247,6 +247,66 @@ def cmd_status(args):
         sys.exit(1)
 
 
+def cmd_logs(args):
+    """Download and display build logs."""
+    client = get_bamboo()
+    build_key = args.build
+
+    # Get build info to find job keys
+    try:
+        data = client.get(
+            f"rest/api/latest/result/{build_key}",
+            params={"expand": "stages.stage.results.result"}
+        )
+    except Exception as e:
+        print(f"Error getting build info: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Collect all job keys from the build
+    job_keys = []
+    for stage in data.get("stages", {}).get("stage", []):
+        for job_result in stage.get("results", {}).get("result", []):
+            job_key = job_result.get("buildResultKey")
+            if job_key:
+                job_keys.append(job_key)
+
+    if not job_keys:
+        # Fall back to build key itself (single job build)
+        job_keys = [build_key]
+
+    # Try to download logs for each job
+    for job_key in job_keys:
+        if len(job_keys) > 1:
+            print(f"\n=== {job_key} ===\n")
+
+        # Try API with logEntries expansion
+        try:
+            log_data = client.get(
+                f"rest/api/latest/result/{job_key}",
+                params={"expand": "logEntries", "max-results": 99999}
+            )
+            log_entries = log_data.get("logEntries", {}).get("logEntry", [])
+            if log_entries:
+                for entry in log_entries:
+                    log_text = entry.get("log", "")
+                    print(log_text)
+                continue
+        except Exception as e:
+            print(f"Error fetching logs via API: {e}", file=sys.stderr)
+
+        # Try direct download with token auth
+        try:
+            log_url = f"{client.url}download/{job_key}/build_logs/{job_key}.log"
+            response = client.session.get(log_url, allow_redirects=False)
+            if response.status_code == 200 and "text" in response.headers.get("content-type", ""):
+                print(response.text)
+                continue
+        except Exception:
+            pass
+
+        print(f"Could not retrieve logs for {job_key}", file=sys.stderr)
+
+
 def relative_time(timestamp_ms):
     """Convert timestamp (ms) to relative time string."""
     import time
@@ -604,6 +664,9 @@ def main() -> None:
     status_parser = subparsers.add_parser("status", help="Show detailed build status")
     status_parser.add_argument("build", nargs="?", help="Build key (e.g., MYPROJECT-BUILD-123). If omitted, detects from git branch")
 
+    logs_parser = subparsers.add_parser("logs", help="Download and display build logs")
+    logs_parser.add_argument("build", help="Build key (e.g., MYPROJECT-BUILD-123)")
+
     deploys_parser = subparsers.add_parser("deploys", help="Show deployment status for each environment")
     deploys_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
 
@@ -635,6 +698,8 @@ def main() -> None:
         cmd_builds(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "logs":
+        cmd_logs(args)
     elif args.command == "deploys":
         cmd_deploys(args)
     elif args.command == "versions":
