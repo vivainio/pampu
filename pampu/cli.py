@@ -440,7 +440,7 @@ def get_deployment_project_id(client, plan_key):
 
 
 def get_env_shas(client, plan_key):
-    """Get SHA for each environment. Returns dict of {env_name: sha}."""
+    """Get SHA and state for each environment. Returns dict of {env_name: (sha, state)}."""
     try:
         dashboard = client.deployment_dashboard()
     except Exception:
@@ -467,10 +467,11 @@ def get_env_shas(client, plan_key):
             if deploy:
                 version_info = deploy.get("deploymentVersion", {})
                 build = version_info.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
+                state = deploy.get("deploymentState", "")
                 if build:
                     sha = get_build_vcs_revision(client, build)
                     if sha:
-                        env_shas[env_name] = sha
+                        env_shas[env_name] = (sha, state)
 
     return env_shas
 
@@ -578,11 +579,15 @@ def cmd_timeline(args):
             print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
             sys.exit(1)
 
-    # Get SHA for each environment
-    env_shas = get_env_shas(client, plan_key)
-    if not env_shas:
+    # Get SHA and state for each environment
+    env_data = get_env_shas(client, plan_key)
+    if not env_data:
         print("No deployments found or could not fetch SHAs")
         sys.exit(1)
+
+    # Extract just SHAs and track states
+    env_shas = {env: sha for env, (sha, state) in env_data.items()}
+    env_states = {env: state for env, (sha, state) in env_data.items()}
 
     # Build reverse lookup: sha -> [env_names]
     sha_to_envs = {}
@@ -600,8 +605,9 @@ def cmd_timeline(args):
         )
         return result.returncode == 0
 
-    main_shas = [sha for sha in set(env_shas.values()) if is_on_main(sha)]
-    branch_shas = {sha: [] for sha in set(env_shas.values()) if not is_on_main(sha)}
+    all_shas = set(env_shas.values())
+    main_shas = [sha for sha in all_shas if is_on_main(sha)]
+    branch_shas = {sha: [] for sha in all_shas if not is_on_main(sha)}
 
     # Track which envs are on branches
     for env_name, sha in env_shas.items():
@@ -636,12 +642,11 @@ def cmd_timeline(args):
             stages.add(stage)
 
     def format_env_label(envs):
-        """Format environment list, grouping complete stages as 'all DEV' etc."""
+        """Format environment list. Returns (short_label, detail_label)."""
         if not envs:
-            return ""
+            return "", ""
 
-        # Parse environments into service/stage
-        env_set = set(envs)
+        # Parse environments into service/stage, tracking states
         by_stage = {}
         ungrouped = []
         for env in envs:
@@ -651,20 +656,45 @@ def cmd_timeline(args):
             else:
                 ungrouped.append(env)
 
-        # Check which stages have all services
-        labels = []
-        grouped_envs = set()
+        # Get marker for individual service/stage
+        def service_marker(service, stage):
+            """Return marker if service in stage has issues."""
+            env = f"{service}_{stage}"
+            state = env_states.get(env, "")
+            if state == "FAILED":
+                return "❌"
+            if state in ("IN_PROGRESS", "QUEUED"):
+                return "⏳"
+            return ""
+
+        # Check if all services in stage have issues
+        def all_stage_marker(stage, stage_envs):
+            """Return marker only if ALL services in stage have same issue."""
+            markers = [service_marker(svc, stage) for svc in stage_envs]
+            if markers and all(m == "❌" for m in markers):
+                return "❌"
+            if markers and all(m == "⏳" for m in markers):
+                return "⏳"
+            return ""
+
+        # Build short labels (all X) and detail labels (partials)
+        short_labels = []
+        detail_labels = []
         for stage in sorted(stages):
-            if stage in by_stage and by_stage[stage] == services:
-                labels.append(f"all {stage}")
-                for service in services:
-                    grouped_envs.add(f"{service}_{stage}")
+            if stage in by_stage:
+                count = len(by_stage[stage])
+                total = len(services)
+                if count == total:
+                    marker = all_stage_marker(stage, by_stage[stage])
+                    short_labels.append(f"all {stage}{marker}")
+                else:
+                    svc_list = ",".join(f"{svc}{service_marker(svc, stage)}" for svc in sorted(by_stage[stage]))
+                    detail_labels.append(f"{stage}({svc_list})")
 
-        # Add remaining ungrouped environments
-        remaining = sorted(env_set - grouped_envs)
-        labels.extend(remaining)
+        # Add any ungrouped environments
+        short_labels.extend(sorted(ungrouped))
 
-        return ", ".join(labels)
+        return ", ".join(short_labels), ", ".join(detail_labels)
 
     def abbreviate_subject(subject, max_len=60):
         """Abbreviate merge PR subjects and truncate if needed."""
@@ -689,15 +719,18 @@ def cmd_timeline(args):
     for sha, author, timestamp, subject in commits:
         envs = sha_to_envs.get(sha, [])
         if envs:
-            env_label = format_env_label(envs)
-            marker = f"<- {env_label}"
+            short_label, detail_label = format_env_label(envs)
+            marker = f"<- {short_label}" if short_label else ""
         else:
             marker = ""
+            detail_label = ""
 
         subject = abbreviate_subject(subject, 48)
         name = short_name(author)
         age = relative_time(timestamp)
         print(f"{sha}  {age:3} {name:10} {subject:50} {marker}")
+        if detail_label:
+            print(f"          {detail_label}")
 
     # Show branch deployments
     if branch_shas:
@@ -725,10 +758,13 @@ def cmd_timeline(args):
                 short_sha, author, timestamp, _subject = git_info
                 name = short_name(author)
                 age = relative_time(timestamp)
-                env_label = format_env_label(envs)
+                short_label, detail_label = format_env_label(envs)
                 if len(branch_name) > 40:
                     branch_name = branch_name[:37] + "..."
-                print(f"  {short_sha}  {age:3} {name:10} {branch_name:42} <- {env_label}")
+                marker = f"<- {short_label}" if short_label else ""
+                print(f"  {short_sha}  {age:3} {name:10} {branch_name:42} {marker}")
+                if detail_label:
+                    print(f"            {detail_label}")
 
 
 _vcs_revision_cache = {}
