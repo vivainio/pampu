@@ -407,12 +407,20 @@ def cmd_deploys(args):
                 when = relative_time(deploy.get("finishedDate"))
                 who = version_info.get("creatorDisplayName", "")
                 build = version_info.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
+                # Add status marker
+                if state == "FAILED":
+                    marker = "❌"
+                elif state in ("IN_PROGRESS", "QUEUED"):
+                    marker = "⏳"
+                else:
+                    marker = ""
             else:
                 version = "(no deployments)"
                 state = ""
                 when = ""
                 who = ""
                 build = ""
+                marker = ""
             if args.sha and build:
                 sha = get_build_vcs_revision(client, build)
                 git_info = get_git_commit_info(sha) if sha else None
@@ -421,11 +429,11 @@ def cmd_deploys(args):
                     # Truncate subject to fit
                     if len(subject) > 50:
                         subject = subject[:47] + "..."
-                    print(f"  {env_name:20} {short_sha:10} {subject}")
+                    print(f"  {env_name:20} {short_sha:10} {subject}{marker}")
                 else:
-                    print(f"  {env_name:20} {sha or '?':10} {version}")
+                    print(f"  {env_name:20} {sha or '?':10} {version}{marker}")
             else:
-                print(f"  {env_name:20} {version:40} {state:10} {when:8} {who}")
+                print(f"  {env_name:20} {version:40} {state:10} {when:8} {who}{marker}")
 
     if not found:
         print(f"No deployment projects found for {plan_key}")
