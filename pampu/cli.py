@@ -396,6 +396,18 @@ def cmd_deploys(args):
         print(f"\n{proj_name}")
         print("-" * len(proj_name))
 
+        # Find newest master version by id (higher id = newer)
+        newest_master_id = 0
+        for env_status in item.get("environmentStatuses", []):
+            deploy = env_status.get("deploymentResult")
+            if deploy:
+                version_info = deploy.get("deploymentVersion", {})
+                version_name = version_info.get("name", "")
+                if version_name.startswith("master-"):
+                    version_id = version_info.get("id", 0)
+                    if version_id > newest_master_id:
+                        newest_master_id = version_id
+
         for env_status in item.get("environmentStatuses", []):
             env = env_status.get("environment", {})
             env_name = env.get("name", "Unknown")
@@ -403,6 +415,8 @@ def cmd_deploys(args):
             if deploy:
                 version_info = deploy.get("deploymentVersion", {})
                 version = version_info.get("name", "?")
+                version_id = version_info.get("id")
+                is_master = version.startswith("master-")
                 state = deploy.get("deploymentState", "?")
                 when = relative_time(deploy.get("finishedDate"))
                 who = version_info.get("creatorDisplayName", "")
@@ -412,6 +426,8 @@ def cmd_deploys(args):
                     marker = "❌"
                 elif state in ("IN_PROGRESS", "QUEUED"):
                     marker = "⏳"
+                elif is_master and newest_master_id and version_id != newest_master_id:
+                    marker = "🐢"
                 else:
                     marker = ""
             else:
