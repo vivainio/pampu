@@ -1,6 +1,7 @@
 """Pampu CLI - Main entry point."""
 
 import argparse
+import re
 import sys
 
 from pampu import __version__
@@ -419,7 +420,15 @@ def cmd_deploys(args):
                 is_master = version.startswith("master-")
                 state = deploy.get("deploymentState", "?")
                 when = relative_time(deploy.get("finishedDate"))
+                # Get deployer name from reasonSummary (manual) or version creator
                 who = version_info.get("creatorDisplayName", "")
+                if not who:
+                    reason = deploy.get("reasonSummary", "")
+                    if "Manual run by" in reason:
+                        # Extract name from: Manual run by <a href="...">Name</a>
+                        match = re.search(r'>([^<]+)</a>', reason)
+                        if match:
+                            who = match.group(1)
                 build = version_info.get("items", [{}])[0].get("planResultKey", {}).get("key", "")
                 # Add status marker
                 if state == "FAILED":
