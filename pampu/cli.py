@@ -471,8 +471,7 @@ def cmd_deploys(args):
                 else:
                     print(f"  {env_name:20} {sha or '?':10} {version}{marker}")
             else:
-                version_display = version + marker
-                print(f"  {env_name:20} {version_display:42} {state:10} {when:8} {who}")
+                print(f"  {env_name:20} {version:40}{marker:2} {state:10} {when:8} {who}")
 
     if not found:
         print(f"No deployment projects found for {plan_key}")
