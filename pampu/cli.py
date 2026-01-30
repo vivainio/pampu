@@ -397,8 +397,10 @@ def cmd_deploys(args):
         print(f"\n{proj_name}")
         print("-" * len(proj_name))
 
-        # Find newest master version by id (higher id = newer)
+        # Find newest master version and count environments at each version
         newest_master_id = 0
+        newest_count = 0
+        older_count = 0
         for env_status in item.get("environmentStatuses", []):
             deploy = env_status.get("deploymentResult")
             if deploy:
@@ -407,7 +409,15 @@ def cmd_deploys(args):
                 if version_name.startswith("master-"):
                     version_id = version_info.get("id", 0)
                     if version_id > newest_master_id:
+                        older_count += newest_count
                         newest_master_id = version_id
+                        newest_count = 1
+                    elif version_id == newest_master_id:
+                        newest_count += 1
+                    else:
+                        older_count += 1
+        # Show race car only if exactly one env is ahead and others are behind
+        show_leader = newest_count == 1 and older_count > 0
 
         for env_status in item.get("environmentStatuses", []):
             env = env_status.get("environment", {})
@@ -437,6 +447,8 @@ def cmd_deploys(args):
                     marker = "⏳"
                 elif is_master and newest_master_id and version_id != newest_master_id:
                     marker = "🐢"
+                elif is_master and show_leader and version_id == newest_master_id:
+                    marker = "🏎️"
                 else:
                     marker = ""
             else:
