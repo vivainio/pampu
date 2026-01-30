@@ -471,9 +471,11 @@ def cmd_deploys(args):
                 else:
                     print(f"  {env_name:20} {sha or '?':10} {version}{marker}")
             else:
-                # Emoji takes 2 visual chars, so adjust padding to keep total at 42
-                version_display = version + marker
-                pad = 40 if marker else 42
+                # Emoji takes 2 visual chars but varies in char count (🐢=1, 🏎️=2)
+                # Use "  " placeholder when no marker to keep alignment
+                marker_display = marker if marker else "  "
+                version_display = version + marker_display
+                pad = 40 + len(marker_display)
                 print(f"  {env_name:20} {version_display:{pad}} {state:10} {when:8} {who}")
 
     if not found:
