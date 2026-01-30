@@ -471,7 +471,9 @@ def cmd_deploys(args):
                 else:
                     print(f"  {env_name:20} {sha or '?':10} {version}{marker}")
             else:
-                print(f"  {env_name:20} {version:40}{marker:2} {state:10} {when:8} {who}")
+                # Emoji takes 2 visual chars, so reduce version padding when marker present
+                version_width = 40 if marker else 42
+                print(f"  {env_name:20} {version:{version_width}}{marker} {state:10} {when:8} {who}")
 
     if not found:
         print(f"No deployment projects found for {plan_key}")
