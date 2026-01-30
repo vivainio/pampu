@@ -454,11 +454,12 @@ def cmd_deploys(args):
                     # Truncate subject to fit
                     if len(subject) > 50:
                         subject = subject[:47] + "..."
-                    print(f"  {env_name:20} {short_sha:10} {subject}{marker}")
+                    print(f"  {env_name:20} {short_sha:10} {subject}")
                 else:
                     print(f"  {env_name:20} {sha or '?':10} {version}{marker}")
             else:
-                print(f"  {env_name:20} {version:40} {state:10} {when:8} {who}{marker}")
+                version_display = version + marker
+                print(f"  {env_name:20} {version_display:42} {state:10} {when:8} {who}")
 
     if not found:
         print(f"No deployment projects found for {plan_key}")
