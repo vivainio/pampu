@@ -50,7 +50,7 @@ pampu logs MYPROJECT-BUILD-123    # Download and display build logs
 
 ### Git-aware status
 
-When inside a git repository with a `.pampu.toml` config file, `pampu status` can automatically detect the current branch:
+When inside a git repository with Bamboo specs, `pampu status` can automatically detect the current branch:
 
 ```bash
 pampu status  # Shows status for current git branch
@@ -59,7 +59,7 @@ pampu status  # Shows status for current git branch
 ### Deployments
 
 ```bash
-pampu deploys                     # Show deployment status (uses .pampu.toml)
+pampu deploys                     # Show deployment status (auto-detected from bamboo.yml)
 pampu deploys MYPROJECT-BUILD     # Show deployment status for a plan
 pampu versions                    # List available versions
 pampu version-create              # Create version from latest build on current branch
@@ -73,12 +73,16 @@ For safety reasons, `pampu deploy` refuses to deploy to any environment containi
 
 ## Project configuration
 
-Create a `.pampu.toml` in your repository root to enable git-aware commands:
+Pampu auto-discovers project configuration from `bamboo-specs/bamboo.yml`:
 
-```toml
-plan = "MYPROJECT-BUILD"
-project = "MYPROJECT"
+```yaml
+plan:
+  project-key: MYPROJECT
+  key: BUILD
+  name: my-build
 ```
+
+This is parsed to extract the plan key (`MYPROJECT-BUILD`) and project key (`MYPROJECT`).
 
 With this config:
 - `pampu status` detects your git branch and shows the matching Bamboo build

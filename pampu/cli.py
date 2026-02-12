@@ -138,12 +138,30 @@ def get_git_branch():
 
 
 def get_repo_config():
-    """Load .pampu.toml by searching upward from current directory."""
+    """Load repo config from bamboo-specs/bamboo.yml or .pampu.toml."""
     import tomllib
     from pathlib import Path
 
+    import yaml
+
     current = Path.cwd()
     for directory in [current, *current.parents]:
+        # First try bamboo-specs/bamboo.yml
+        bamboo_path = directory / "bamboo-specs" / "bamboo.yml"
+        if bamboo_path.exists():
+            with open(bamboo_path) as f:
+                doc = next(yaml.safe_load_all(f), None)  # First YAML document only
+                if doc and "plan" in doc:
+                    plan_info = doc["plan"]
+                    project_key = plan_info.get("project-key")
+                    key = plan_info.get("key")
+                    if project_key and key:
+                        return {
+                            "project": project_key,
+                            "plan": f"{project_key}-{key}",
+                        }
+
+        # Fall back to .pampu.toml
         config_path = directory / ".pampu.toml"
         if config_path.exists():
             with open(config_path, "rb") as f:
@@ -203,8 +221,7 @@ def cmd_status(args):
         config = get_repo_config()
         plan_key = config.get("plan")
         if not plan_key:
-            print("Error: No build specified and no .pampu.toml found", file=sys.stderr)
-            print("Create .pampu.toml with: plan = \"MYPROJECT-BUILD\"", file=sys.stderr)
+            print("Error: No build specified and no bamboo-specs/bamboo.yml found", file=sys.stderr)
             sys.exit(1)
 
         git_branch = get_git_branch()
@@ -366,7 +383,7 @@ def cmd_deploys(args):
         config = get_repo_config()
         plan_key = config.get("project") or config.get("plan")
         if not plan_key:
-            print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
+            print("Error: No plan specified and no bamboo-specs/bamboo.yml found", file=sys.stderr)
             sys.exit(1)
 
     # Fetch entire deployment dashboard in one call
@@ -627,7 +644,7 @@ def cmd_timeline(args):
         config = get_repo_config()
         plan_key = config.get("project") or config.get("plan")
         if not plan_key:
-            print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
+            print("Error: No plan specified and no bamboo-specs/bamboo.yml found", file=sys.stderr)
             sys.exit(1)
 
     # Get SHA and state for each environment
@@ -844,7 +861,7 @@ def cmd_versions(args):
         config = get_repo_config()
         plan_key = config.get("plan")
         if not plan_key:
-            print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
+            print("Error: No plan specified and no bamboo-specs/bamboo.yml found", file=sys.stderr)
             sys.exit(1)
 
     proj_id = get_deployment_project_id(client, plan_key)
@@ -889,7 +906,7 @@ def cmd_version_create(args):
     config = get_repo_config()
     plan_key = config.get("plan")
     if not plan_key:
-        print("Error: No .pampu.toml found with plan", file=sys.stderr)
+        print("Error: No bamboo-specs/bamboo.yml found with plan", file=sys.stderr)
         sys.exit(1)
 
     build_key = args.build
@@ -911,7 +928,9 @@ def cmd_version_create(args):
                 print(f"Error: Could not extract ticket from branch '{git_branch}'", file=sys.stderr)
                 sys.exit(1)
 
-            branch_key, branch_name = find_bamboo_branch(client, plan_key, ticket)
+            branch_key, _ = find_bamboo_branch(client, plan_key, ticket)
+            # Use git branch name (with slashes replaced) for consistent version naming
+            branch_name = git_branch.replace("/", "-")
             if not branch_key:
                 print(f"Error: No Bamboo branch found matching '{ticket}'", file=sys.stderr)
                 sys.exit(1)
@@ -988,7 +1007,7 @@ def cmd_deploy(args):
         config = get_repo_config()
         plan_key = config.get("plan")
     if not plan_key:
-        print("Error: No plan specified and no .pampu.toml found", file=sys.stderr)
+        print("Error: No plan specified and no bamboo-specs/bamboo.yml found", file=sys.stderr)
         sys.exit(1)
 
     proj_id = get_deployment_project_id(client, plan_key)
@@ -1110,11 +1129,11 @@ def main() -> None:
     logs_parser.add_argument("build", help="Build key (e.g., MYPROJECT-BUILD-123)")
 
     deploys_parser = subparsers.add_parser("deploys", help="Show deployment status for each environment")
-    deploys_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
+    deploys_parser.add_argument("plan", nargs="?", help="Plan key (auto-detected from bamboo.yml if omitted)")
     deploys_parser.add_argument("--sha", action="store_true", help="Show git SHA for each deployment")
 
     versions_parser = subparsers.add_parser("versions", help="List available versions")
-    versions_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
+    versions_parser.add_argument("plan", nargs="?", help="Plan key (auto-detected from bamboo.yml if omitted)")
     versions_parser.add_argument("-n", "--limit", type=int, default=20, help="Number of versions (default: 20)")
     versions_parser.add_argument("--sha", action="store_true", help="Show git SHA for each version")
 
@@ -1124,12 +1143,12 @@ def main() -> None:
     deploy_parser = subparsers.add_parser("deploy", help="Deploy a version to one or more environments")
     deploy_parser.add_argument("version", help="Version name")
     deploy_parser.add_argument("environments", nargs="+", help="Environment name(s)")
-    deploy_parser.add_argument("--plan", help="Plan key (default: from .pampu.toml)")
+    deploy_parser.add_argument("--plan", help="Plan key (auto-detected from bamboo.yml)")
     deploy_parser.add_argument("--chain", action="store_true", help="Deploy sequentially, waiting for each to complete")
     deploy_parser.add_argument("--parallel", action="store_true", help="Deploy to all environments simultaneously")
 
     timeline_parser = subparsers.add_parser("timeline", help="Show git history with environment markers")
-    timeline_parser.add_argument("plan", nargs="?", help="Plan key. If omitted, reads from .pampu.toml")
+    timeline_parser.add_argument("plan", nargs="?", help="Plan key (auto-detected from bamboo.yml if omitted)")
 
     args = parser.parse_args()
 
