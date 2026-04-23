@@ -104,8 +104,12 @@ def cmd_builds(args):
         sys.exit(1)
 
     try:
-        # Use direct API call - works for both plans and branches
-        data = client.get(f"rest/api/latest/result/{plan_key}", params={"max-results": args.limit})
+        # Use direct API call - works for both plans and branches.
+        # includeAllStates=true so in-progress builds show up too.
+        data = client.get(
+            f"rest/api/latest/result/{plan_key}",
+            params={"max-results": args.limit, "includeAllStates": "true"},
+        )
         results = data.get("results", {}).get("result", [])
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -216,10 +220,33 @@ def cmd_status(args):
     client = get_bamboo()
     build_key = args.build
 
-    # If no build specified, try to detect from git branch
+    # If no build specified, show in-progress builds then auto-detect from git branch
     if not build_key:
         config = get_repo_config()
         plan_key = config.get("plan")
+
+        # Show currently in-progress / queued builds
+        try:
+            queue_data = client.get("rest/api/latest/queue", params={"expand": "queuedBuilds"})
+            queued = queue_data.get("queuedBuilds", {}).get("build", [])
+            # Filter to current plan if known
+            if plan_key:
+                queued = [b for b in queued if b.get("buildResultKey", "").startswith(plan_key + "-")]
+            if queued:
+                print("In progress:")
+                for b in queued:
+                    key = b.get("buildResultKey", "?")
+                    pct = b.get("percentageCompleteStr", "")
+                    reason = b.get("triggerReason", "")
+                    reason = re.sub(r"<[^>]+>", "", reason)
+                    if pct:
+                        print(f"  {key:30} {pct:6}  {reason}")
+                    else:
+                        print(f"  {key:30} queued  {reason}")
+                print()
+        except Exception:
+            pass
+
         if not plan_key:
             print("Error: No build specified and no bamboo-specs/bamboo.yml found", file=sys.stderr)
             sys.exit(1)
